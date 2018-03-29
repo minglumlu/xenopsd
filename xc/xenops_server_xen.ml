@@ -105,6 +105,7 @@ module VmExtra = struct
     nomigrate: bool;  (* platform:nomigrate   at boot time *)
     nested_virt: bool; (* platform:nested_virt at boot time *)
     suspend_memory_bytes: int64;
+    qemu_vbds: (Vbd.id * (int * qemu_frontend)) list;
   } [@@deriving rpc]
 
   let default_persistent_t =
@@ -115,6 +116,7 @@ module VmExtra = struct
     ; nomigrate = false
     ; nested_virt = false
     ; suspend_memory_bytes = 0L
+    ; qemu_vbds = []
     }
 
   (* override rpc code generated for persistent_t. It is important that
@@ -125,7 +127,6 @@ module VmExtra = struct
     |> persistent_t_of_rpc
 
   type non_persistent_t = {
-    qemu_vbds: (Vbd.id * (int * qemu_frontend)) list;
     qemu_vifs: (Vif.id * (int * qemu_frontend)) list;
     pci_msitranslate: bool;
     pci_power_mgmt: bool;
@@ -826,6 +827,7 @@ module VM = struct
       nomigrate = false;
       nested_virt = false;
       suspend_memory_bytes = 0L;
+      qemu_vbds = [];
     } |> VmExtra.rpc_of_persistent_t |> Jsonrpc.to_string
 
   let mkints n =
@@ -848,7 +850,6 @@ module VM = struct
 
   let generate_non_persistent_state xc xs vm =
     VmExtra.{
-      qemu_vbds = [];
       qemu_vifs = [];
       pci_msitranslate = vm.Vm.pci_msitranslate;
       pci_power_mgmt = vm.Vm.pci_power_mgmt;
@@ -931,6 +932,7 @@ module VM = struct
                         ~platformdata:vm.Xenops_interface.Vm.platformdata
                         ~default:false
                   ; suspend_memory_bytes = 0L
+                  ; qemu_vbds = []
                   } in
                 let non_persistent = generate_non_persistent_state xc xs vm in
                 Some VmExtra.{persistent; non_persistent}
@@ -1204,9 +1206,8 @@ module VM = struct
     | {
       VmExtra.build_info = Some build_info;
       ty = Some ty;
-    },{
-        VmExtra.qemu_vbds = qemu_vbds
-      } ->
+      VmExtra.qemu_vbds = qemu_vbds;
+    }, _ ->
       let make ?(boot_order="cd") ?(serial="pty") ?(monitor="null")
           ?(nics=[]) ?(disks=[]) ?(vgpus=[])
           ?(pci_emulations=[]) ?(usb=Device.Dm.Disabled)
@@ -2319,9 +2320,9 @@ module VBD = struct
                 we will. Also this causes the SMRT tests to fail, as they demand the loopback VBDs *)
              Opt.iter (fun q ->
                  let _ = DB.update_exn vm (fun vm_t ->
-                     let non_persistent = { vm_t.VmExtra.non_persistent with
-                                            VmExtra.qemu_vbds = (vbd.Vbd.id, q) :: vm_t.VmExtra.non_persistent.VmExtra.qemu_vbds} in
-                     Some { vm_t with VmExtra.non_persistent = non_persistent }
+                     let persistent = { vm_t.VmExtra.persistent with
+                                            VmExtra.qemu_vbds = (vbd.Vbd.id, q) :: vm_t.VmExtra.persistent.VmExtra.qemu_vbds} in
+                     Some { vm_t with VmExtra.persistent = persistent }
                    )
                  in ()
                ) qemu_frontend
@@ -2377,14 +2378,14 @@ module VBD = struct
                 (* If we have a qemu frontend, detach this too. *)
                 let _ = DB.update vm (
                     Opt.map (fun vm_t ->
-                        let non_persistent = vm_t.VmExtra.non_persistent in
-                        if List.mem_assoc vbd.Vbd.id non_persistent.VmExtra.qemu_vbds then begin
-                          let _, qemu_vbd = List.assoc vbd.Vbd.id non_persistent.VmExtra.qemu_vbds in
+                        let persistent = vm_t.VmExtra.persistent in
+                        if List.mem_assoc vbd.Vbd.id persistent.VmExtra.qemu_vbds then begin
+                          let _, qemu_vbd = List.assoc vbd.Vbd.id persistent.VmExtra.qemu_vbds in
                           (* destroy_vbd_frontend ignores 'refusing to close' transients' *)
                           destroy_vbd_frontend ~xc ~xs task qemu_vbd;
-                          let non_persistent = { non_persistent with
-                                                 VmExtra.qemu_vbds = List.remove_assoc vbd.Vbd.id non_persistent.VmExtra.qemu_vbds } in
-                          { vm_t with VmExtra.non_persistent = non_persistent }
+                          let persistent = { persistent with
+                                             VmExtra.qemu_vbds = List.remove_assoc vbd.Vbd.id persistent.VmExtra.qemu_vbds } in
+                          { vm_t with VmExtra.persistent = persistent }
                         end else
                           vm_t
                       )
