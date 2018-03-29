@@ -103,7 +103,8 @@ module VmExtra = struct
     last_start_time: float;
     domain_config: Domain.arch_domainconfig option;
     nomigrate: bool;  (* platform:nomigrate   at boot time *)
-    nested_virt: bool (* platform:nested_virt at boot time *)
+    nested_virt: bool; (* platform:nested_virt at boot time *)
+    suspend_memory_bytes: int64;
   } [@@deriving rpc]
 
   let default_persistent_t =
@@ -113,6 +114,7 @@ module VmExtra = struct
     ; domain_config = None
     ; nomigrate = false
     ; nested_virt = false
+    ; suspend_memory_bytes = 0L
     }
 
   (* override rpc code generated for persistent_t. It is important that
@@ -123,7 +125,6 @@ module VmExtra = struct
     |> persistent_t_of_rpc
 
   type non_persistent_t = {
-    suspend_memory_bytes: int64;
     qemu_vbds: (Vbd.id * (int * qemu_frontend)) list;
     qemu_vifs: (Vif.id * (int * qemu_frontend)) list;
     pci_msitranslate: bool;
@@ -823,7 +824,8 @@ module VM = struct
       last_start_time = 0.;
       domain_config = None;
       nomigrate = false;
-      nested_virt = false
+      nested_virt = false;
+      suspend_memory_bytes = 0L;
     } |> VmExtra.rpc_of_persistent_t |> Jsonrpc.to_string
 
   let mkints n =
@@ -846,7 +848,6 @@ module VM = struct
 
   let generate_non_persistent_state xc xs vm =
     VmExtra.{
-      suspend_memory_bytes = 0L;
       qemu_vbds = [];
       qemu_vifs = [];
       pci_msitranslate = vm.Vm.pci_msitranslate;
@@ -929,6 +930,7 @@ module VM = struct
                         ~key:"nested-virt"
                         ~platformdata:vm.Xenops_interface.Vm.platformdata
                         ~default:false
+                  ; suspend_memory_bytes = 0L
                   } in
                 let non_persistent = generate_non_persistent_state xc xs vm in
                 Some VmExtra.{persistent; non_persistent}
@@ -946,7 +948,7 @@ module VM = struct
             let overhead_bytes = compute_overhead persistent
               vm.vcpu_max vm.memory_static_max shadow_multiplier
             in
-            let resuming = non_persistent.VmExtra.suspend_memory_bytes <> 0L in
+            let resuming = persistent.VmExtra.suspend_memory_bytes <> 0L in
             (* If we are resuming then we know exactly how much memory is needed. If we are
                live migrating then we will only know an upper bound. If we are starting from
                scratch then we have a free choice. *)
@@ -956,8 +958,8 @@ module VM = struct
                 x, x
               | None ->
                 if resuming then begin
-                  debug "VM = %s; using stored suspend_memory_bytes = %Ld" vm.Vm.id non_persistent.VmExtra.suspend_memory_bytes;
-                  non_persistent.VmExtra.suspend_memory_bytes, non_persistent.VmExtra.suspend_memory_bytes
+                  debug "VM = %s; using stored suspend_memory_bytes = %Ld" vm.Vm.id persistent.VmExtra.suspend_memory_bytes;
+                  persistent.VmExtra.suspend_memory_bytes, persistent.VmExtra.suspend_memory_bytes
                 end else begin
                   debug "VM = %s; using memory_dynamic_min = %Ld and memory_dynamic_max = %Ld" vm.Vm.id vm.memory_dynamic_min vm.memory_dynamic_max;
                   vm.memory_dynamic_min, vm.memory_dynamic_max
@@ -1686,10 +1688,10 @@ module VM = struct
                 ) (Xenops_utils.chunks 10 vbds);
               debug "VM = %s; domid = %d; Storing final memory usage" vm.Vm.id domid;
               let _ = DB.update_exn vm.Vm.id (fun d ->
-                  let non_persistent = { d.VmExtra.non_persistent with
+                  let persistent = { d.VmExtra.persistent with
                                          VmExtra.suspend_memory_bytes = Memory.bytes_of_pages pages;
                                        } in
-                  Some {d with VmExtra.non_persistent = non_persistent}
+                  Some {d with VmExtra.persistent = persistent}
                 )
               in ()
            )
@@ -1784,7 +1786,7 @@ module VM = struct
          | None ->
            (* XXX: we need to store (eg) guest agent info *)
            begin match vme with
-             | Some vmextra when vmextra.VmExtra.non_persistent.VmExtra.suspend_memory_bytes = 0L ->
+             | Some vmextra when vmextra.VmExtra.persistent.VmExtra.suspend_memory_bytes = 0L ->
                halted_vm
              | Some _ ->
                { halted_vm with Vm.power_state = Suspended }
